@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>Glitch Poster Creator V12</title>
+  <style>
+    /* 基础样式 */
+    body { 
+      background: #000; 
+      color: #fff; 
+      margin: 0; padding: 0; 
+      width: 100vw; height: 100vh; 
+      overflow: hidden; 
+      display: flex; justify-content: center; align-items: center; 
+      font-family: 'Helvetica Neue', Arial, sans-serif; 
+    }
+    
+    /* 顶部控制岛 */
+    #ui-panel {
+      position: fixed; top: 20px; 
+      background: rgba(15, 15, 15, 0.95); 
+      padding: 10px 25px; 
+      border-radius: 50px;
+      border: 1px solid #333; 
+      display: flex; gap: 20px; align-items: center; 
+      z-index: 100;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 10px 40px rgba(0,0,0,0.8);
+    }
+    
+    /* 控件通用样式 */
+    .control-group {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 11px; color: #888; letter-spacing: 1px;
+      border-right: 1px solid #333; padding-right: 20px;
+    }
+    .control-group:last-child { border-right: none; padding-right: 0; }
+
+    button, label {
+      background: #222; color: #ccc; border: 1px solid #444; 
+      padding: 6px 14px; border-radius: 20px; cursor: pointer; 
+      font-size: 11px; transition: 0.2s;
+    }
+    button:hover, label:hover { background: #fff; color: #000; border-color: #fff; }
+    button:active { transform: scale(0.95); }
+    button:disabled { border-color: #222; color: #444; cursor: not-allowed; background: transparent; }
+    
+    /* 红色清空按钮 */
+    #clearBtn { border-color: #622; color: #f88; background: #211; }
+    #clearBtn:hover { background: #d00; color: #fff; border-color: #f00; }
+
+    input[type="file"] { display: none; }
+    
+    /* 滑动条美化 */
+    input[type=range] {
+      width: 80px; height: 4px; background: #333; border-radius: 2px;
+      -webkit-appearance: none; outline: none;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 12px; height: 12px;
+      background: #ccc; border-radius: 50%; cursor: pointer;
+    }
+    input[type=range]::-webkit-slider-thumb:hover { background: #fff; }
+
+    /* 底部提示 */
+    #status-bar {
+      position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+      color: #444; font-size: 12px; pointer-events: none;
+      text-transform: uppercase; letter-spacing: 2px;
+    }
+  </style>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/addons/p5.sound.min.js"></script>
+  <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script>
+</head>
+<body>
+
+  <div id="ui-panel">
+    <div class="control-group">
+      <label for="imgIn">IMG</label>
+      <input type="file" id="imgIn" accept="image/*">
+      <label for="sndIn">MP3</label>
+      <input type="file" id="sndIn" accept="audio/*">
+    </div>
+
+    <div class="control-group">
+      <button id="startBtn" disabled>START</button>
+      <button id="clearBtn">CLEAR ALL</button>
+    </div>
+
+    <div class="control-group" style="border:none">
+      <span>CHAOS</span>
+      <input type="range" id="chaosIn" min="0" max="100" value="50">
+      
+      <span style="margin-left:10px">ZOOM</span>
+      <input type="range" id="zoomIn" min="0.5" max="3.0" step="0.1" value="1.0">
+    </div>
+  </div>
+  
+  <div id="status-bar">System Standby</div>
+
+  <script>
+    let bgImg, mySound, amplitude;
+    let video, handPose, hands = [];
+    
+    // --- 核心状态 ---
+    let rectLayers = []; // 存储所有已固定的矩形
+    let currentRect = null; // 当前正在手绘的矩形
+    let wasPinching = false; // 上一帧是否在捏合 (用于检测松开瞬间)
+    let imgScaleRatio = 1;
+
+    // 参数
+    const PINCH_DIST = 40; 
+    const STRIP_SIZE = 15; // 粗条纹
+
+    // DOM
+    const startBtn = document.getElementById('startBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const status = document.getElementById('status-bar');
+    const chaosIn = document.getElementById('chaosIn');
+    const zoomIn = document.getElementById('zoomIn');
+
+    // 1. 资源加载
+    document.getElementById('imgIn').onchange = (e) => {
+      if(e.target.files[0]) {
+        loadImage(URL.createObjectURL(e.target.files[0]), img => {
+          bgImg = img;
+          fitCanvas();
+          checkReady();
+        });
+      }
+    };
+    document.getElementById('sndIn').onchange = (e) => {
+      if(e.target.files[0]) {
+        loadSound(URL.createObjectURL(e.target.files[0]), snd => {
+          if(mySound) mySound.stop();
+          mySound = snd;
+          checkReady();
+        });
+      }
+    };
+
+    function checkReady() {
+      if(bgImg && mySound) {
+        startBtn.disabled = false;
+        startBtn.style.color = "#fff";
+        startBtn.style.borderColor = "#fff";
+        status.innerText = "Data Loaded";
+      }
+    }
+
+    // 2. 清空逻辑
+    clearBtn.onclick = () => {
+      rectLayers = []; // 清空历史图层
+      currentRect = null;
+      status.innerText = "Canvas Cleared";
+      // 给个闪烁反馈
+      background(50); 
+    };
+
+    // 3. 启动逻辑
+    startBtn.onclick = () => {
+      if(!bgImg || !mySound) return;
+      userStartAudio();
+      startBtn.innerText = "...";
+      status.innerText = "Initializing Neural Net...";
+      
+      video = createCapture(VIDEO);
+      video.size(640, 480);
+      video.hide();
+
+      handPose = ml5.handPose(video, {
+        maxHands: 2, flipped: true, runtime: "mediapipe", modelType: "full"
+      }, () => {
+        startBtn.innerText = "ON";
+        startBtn.style.background = "#fff";
+        startBtn.style.color = "#000";
+        status.innerText = "Ready: Pinch with both hands";
+        
+        if(!mySound.isPlaying()) mySound.loop();
+        handPose.detectStart(video, r => hands = r);
+        loop();
+      });
+    };
+
+    function setup() {
+      let cnv = createCanvas(windowWidth, windowHeight);
+      cnv.parent(document.body);
+      background(0);
+      amplitude = new p5.Amplitude();
+      noLoop();
+    }
+
+    function fitCanvas() {
+      if (!bgImg) return;
+      let maxW = windowWidth, maxH = windowHeight;
+      let imgRatio = bgImg.width / bgImg.height;
+      let screenRatio = maxW / maxH;
+      
+      if (imgRatio > screenRatio) resizeCanvas(maxW, maxW / imgRatio);
+      else resizeCanvas(maxH * imgRatio, maxH);
+      
+      imgScaleRatio = bgImg.width / width;
+    }
+    
+    window.onresize = fitCanvas;
+
+    function draw() {
+      background(0);
+      if(!bgImg) { fill(40); textAlign(CENTER); text("NO IMAGE", width/2, height/2); return; }
+
+      // 1. 绘制底图
+      image(bgImg, 0, 0, width, height);
+
+      let vol = 0;
+      if(mySound && mySound.isPlaying()) vol = amplitude.getLevel() * 2;
+
+      // 获取当前滑杆参数 (实时影响所有矩形)
+      let chaosVal = chaosIn.value;
+      let zoomVal = parseFloat(zoomIn.value);
+
+      // 2. 手势识别
+      let activePinch = [];
+      if (hands.length > 0) {
+        for (let hand of hands) {
+          let t = hand.keypoints[4], i = hand.keypoints[8];
+          if (dist(t.x, t.y, i.x, i.y) < PINCH_DIST) {
+            activePinch.push({
+              x: map(t.x, 0, video.width, 0, width),
+              y: map(t.y, 0, video.height, 0, height)
+            });
+          }
+        }
+      }
+
+      // 3. 状态机逻辑 (图层管理)
+      let isPinchingNow = (activePinch.length >= 2);
+
+      if (isPinchingNow) {
+        // 正在绘制：更新 CurrentRect
+        let p1 = activePinch[0], p2 = activePinch[1];
+        currentRect = {
+          x: min(p1.x, p2.x), y: min(p1.y, p2.y),
+          w: abs(p1.x - p2.x), h: abs(p1.y - p2.y)
+        };
+        wasPinching = true; // 标记状态
+      } else {
+        // 未捏合
+        if (wasPinching && currentRect) {
+          // 刚松开的一瞬间：保存图层
+          // 如果矩形太小(误触)，就不保存
+          if (currentRect.w > 20 && currentRect.h > 20) {
+            rectLayers.push(currentRect);
+          }
+          currentRect = null;
+          wasPinching = false;
+        }
+      }
+
+      // 4. 渲染所有矩形 (先画历史的，再画当前的)
+      
+      // A. 历史图层 (Locked Layers)
+      for (let r of rectLayers) {
+        applyShredder(r, vol, chaosVal, zoomVal);
+        drawBorder(r, 0.5, 255); // 白色细线
+      }
+
+      // B. 当前图层 (Active Layer)
+      if (currentRect) {
+        applyShredder(currentRect, vol, chaosVal, zoomVal);
+        drawBorder(currentRect, 1, [0, 255, 0]); // 绿色高亮，提示正在编辑
+        
+        // 辅助线 (十字准心)
+        drawCrosshair(activePinch[0]);
+        drawCrosshair(activePinch[1]);
+      }
+      
+      // 更新底部状态
+      if (isPinchingNow) status.innerText = `CREATING ZONE | ${Math.round(currentRect.w)}x${Math.round(currentRect.h)}`;
+      else status.innerText = `LAYERS: ${rectLayers.length} | READY`;
+    }
+
+    // 辅助绘制
+    function drawBorder(r, weight, col) {
+      noFill(); stroke(col); strokeWeight(weight);
+      rect(r.x, r.y, r.w, r.h);
+    }
+    
+    function drawCrosshair(p) {
+      stroke(0, 255, 0, 150); strokeWeight(1);
+      line(p.x - 10, p.y, p.x + 10, p.y);
+      line(p.x, p.y - 10, p.x, p.y + 10);
+    }
+
+    // --- 核心渲染算法 (含缩放) ---
+    function applyShredder(r, vol, chaos, zoom) {
+      if (r.w < 2 || r.h < 2) return;
+
+      let intensity = map(chaos, 0, 100, 0, 3.0);
+      
+      // 遍历条纹
+      for (let y = r.y; y < r.y + r.h; y += STRIP_SIZE) {
+        let noiseVal = noise(y * 0.05, frameCount * 0.1);
+        let shift = map(noiseVal, 0, 1, -20, 20) * (1 + vol * 2) * intensity;
+
+        // --- 缩放逻辑 ---
+        // 目标绘制区域 (Canvas)
+        let dstX = r.x; 
+        let dstY = y;
+        let dstW = r.w;
+        let dstH = STRIP_SIZE;
+
+        // 源抓取区域 (Image High Res)
+        // 1. 找到矩形中心对应的原图坐标
+        let centerX = (r.x + r.w / 2) * imgScaleRatio;
+        let centerY = (y + STRIP_SIZE / 2) * imgScaleRatio; // Y轴逐行抓取
+
+        // 2. 根据 Zoom 计算抓取范围
+        // 放大(Zoom > 1): 抓取更小的区域 (srcW 变小)
+        // 缩小(Zoom < 1): 抓取更大的区域 (srcW 变大)
+        let srcW = (r.w * imgScaleRatio) / zoom;
+        let srcH = (STRIP_SIZE * imgScaleRatio) / zoom; // Y轴也缩放，保持比例
+
+        // 3. 计算源左上角 (中心点 - 宽高的一半) + 错位Shift
+        let srcX = centerX - srcW / 2 + (shift * imgScaleRatio);
+        let srcY = centerY - srcH / 2;
+
+        try {
+          copy(bgImg, 
+               srcX, srcY, srcW, srcH,  // 源
+               dstX, dstY, dstW, dstH   // 目标
+          );
+        } catch(e) {}
+      }
+    }
+  </script>
+</body>
+</html>
